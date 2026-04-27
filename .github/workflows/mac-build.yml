@@ -1,0 +1,37 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches: [ lakshya-dev ]
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew || true
+
+      - name: Build JAR
+        run: ./gradlew build
+
+      - name: Make script executable
+        run: chmod +x package-mac.sh
+
+      - name: Build DMG
+        run: ./package-mac.sh
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v3
+        with:
+          name: vistora-dmg
+          path: dist/*.dmg
