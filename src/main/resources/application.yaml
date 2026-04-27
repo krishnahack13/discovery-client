@@ -1,0 +1,197 @@
+spring:
+  application:
+    name: discovery-client
+  cache:
+    cache-names:
+      - auditEventTypes
+    caffeine:
+      spec: maximumSize=100, expireAfterWrite=24h
+
+  # H2 Configuration (uncomment all below for local testing with H2)
+  # h2:
+  #   console:
+  #     enabled: true
+  #     path: /h2-console
+  #     settings:
+  #       web-allow-others: true
+  #   show-sql: true
+
+  # H2 Database Configuration (for local testing)
+  # datasource:
+  #   jdbc-url: jdbc:h2:file:./testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+  #   driver-class-name: org.h2.Driver
+  #   username: sa
+  #   password:
+  #   hikari:
+  #     pool-name: H2Pool
+  #     maximum-pool-size: 10
+
+  # MySQL Database Configuration (for production)
+  datasource:
+    jdbc-url: jdbc:mysql://vistora-mysql.cbq60mg2m13d.eu-north-1.rds.amazonaws.com:3306/t_example
+    username: sushant_shubham
+    password: sushant@grafyn
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: DiscoveryClientServiceHikariPool
+      maximum-pool-size: 3          # max 3 connections per local instance (5 devs × 3 = 15 total max)
+      minimum-idle: 0               # release ALL idle connections; connections are created on demand
+                                    # → no sleeping connections held open when nobody uses the app
+      idle-timeout: 30000           # return a connection to pool after 30 s idle (was 60 s)
+      max-lifetime: 300000          # recycle connections after 5 min (was 60 min) — prevents stale TCP
+      connection-timeout: 15000     # fail fast if pool exhausted (15 s)
+      leak-detection-threshold: 60000  # warn after 60 s if a connection is not returned
+      register-mbeans: true
+      connection-test-query: SELECT 1
+      # keepalive-time REMOVED — it was pinging MySQL every 60 s to keep sleeping
+      # connections alive, which defeats the purpose of idle-timeout entirely.
+      # MySQL's own wait_timeout will close truly idle connections on its side.
+      #
+      # initialization-fail-timeout REMOVED (was -1).
+      # -1 means "start even if DB is unreachable", which can cause uncontrolled
+      # connection-retry storms at startup when the DB is slow. Default (1) is safer.
+      connection-init-sql: SET SESSION sql_mode='TRADITIONAL'
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        # Important: Enable physical naming strategy to respect schema
+        globally_quoted_identifiers: false
+        # MySQL dialect for production
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        # Hibernate batch insert configuration for audit logging performance
+        jdbc:
+          batch_size: 50  # Process 50 inserts per batch
+        order_inserts: true  # Order inserts for better batching
+        order_updates: true  # Order updates for better batching
+
+server:
+  port: 8078
+  servlet:
+    context-path: /discovery-client
+
+external:
+  databricks-service:
+    base-url: http://localhost:8082/grafyn-agent/api/v1/databricks
+  snowflake-service:
+    base-url: http://localhost:8082/grafyn-agent/api/v1/snowflake/jobs
+
+common-services-agent:
+  base-url: http://localhost:8082/grafyn-agent
+
+save:
+  connection:
+    agent:
+      url: http://localhost:8082/grafyn-agent/api/v1/connections
+
+app:
+  internal:
+    base-url: http://localhost:8078/discovery-client
+
+api:
+  github-scanner: http://localhost:8082/grafyn-agent/api/v1/github/scan
+  github: http://localhost:8082/grafyn-agent/api/v1/github
+  databricks: http://localhost:8079/databricks-analysis/api/v1/databricks
+  snowflake: http://localhost:8070/snowflake-client/api/v1/snowflake
+  vertex: http://localhost:8082/grafyn-agent/api/v1/vertexai
+  bigquery: http://localhost:8082/grafyn-agent/api/v1/bigquery
+  base-url: http://localhost:8080/common-service
+  huggingfaces: http://localhost:8085/huggingfaces-service/api/v1/huggingfaces
+  s3: http://localhost:8075/api/v1/s3
+  sagemaker: http://localhost:8082/grafyn-agent/api/v1/aws/sagemaker
+  microsoft: http://localhost:8082/grafyn-agent/api/v1/microsoft
+  okta: http://localhost:8082/grafyn-agent/api/v1/okta
+  google: http://localhost:8082/grafyn-agent/api/v1/google
+  eks: http://localhost:8088/ragscanner-client/api
+  pinecone: http://localhost:9000/api/v1/pinecone
+  airflow: http://localhost:8084/airflow-service/api/v1/airflow/pipelines
+  kubeflow: http://localhost:8087/google-service/api/v1/kubeflow
+  sensitive-data-detection: http://localhost:8083/sdd-client/api/v1/sdd-client/trigger-detection
+  performance-monitoring: http://localhost:8084/pm-client/api/v1/pm-client/trigger
+  mcp-discovery: http://localhost:8082/grafyn-agent/api/v1/mcp
+  mcp-github: http://localhost:8082/grafyn-agent/api/v1/github
+  agentbricks: http://localhost:8079/databricks-analysis/api/v1/agentbricks
+
+# Agent Service URLs
+databricks:
+  agent:
+    url: http://localhost:8082/grafyn-agent/api/v1/databricks/users
+
+snowflake:
+  agent:
+    url: http://localhost:8082/grafyn-agent/api/v1/snowflake/users
+
+bigquery:
+  agent:
+    url: http://localhost:8082/grafyn-agent/api/v1/bigquery/users
+
+common-service:
+  base-url: http://localhost:8080/common-service
+
+common:
+  base-url: http://localhost:8080/common-service
+
+agents-monitor:
+  ai-signatures:
+    enabled: true
+    browser-extension-activity-threshold-days: 7
+    ai-keywords:
+      - gpt
+      - chatgpt
+      - copilot
+      - claude
+      - gemini
+      - bard
+      - llm
+      - openai
+      - anthropic
+      - codium
+      - codeium
+    initial-catalog:
+      - tool-name: Cursor AI (IDE)
+        process-names: [cursor, Cursor.exe]
+        extension-ids: [cursor.cursor-tutor]
+        allowed: true
+        category: IDE tool
+      - tool-name: Claude CLI
+        process-names: [claude, claude.exe, anthropic, anthropic.exe]
+        env-variable-signatures: [ANTHROPIC_API_KEY, CLAUDE_API_KEY]
+        config-file-signatures: [.anthropic]
+        allowed: true
+        category: CLI
+      - tool-name: GitHub Copilot
+        extension-ids: [github.copilot, github-copilot-intellij]
+        allowed: true
+        category: IDE tool
+      - tool-name: Windows Copilot
+        process-names: [Copilot.exe, copilot]
+        allowed: true
+        category: Developer App
+      - tool-name: Windsurf AI
+        process-names: [windsurf, windsurf.exe]
+        extension-ids: [exafunction.codeium]
+        allowed: true
+        category: Developer App
+      - tool-name: Devin AI Agent
+        process-names: [devin, devin.exe]
+        allowed: true
+        category: Developer App
+      - tool-name: Ollama
+        process-names: [ollama, ollama.exe, ollama_llama_server.exe, llama-server]
+        known-ports: [11434]
+        allowed: true
+        category: Local LLM
+      - tool-name: Google Gemini
+        process-names: [gemini, gemini.exe, GoogleGemini, gemini-web]
+        allowed: true
+        category: AI Assistant
+  # AWS credenials
+org.aws.access-key-id: ${AWS_ACCESS_KEY}
+org.aws.secret-access-key: ${AWS_SECRET_KEY}
+
+# Risk Score Service (Python FastAPI)
+risk.score.service.url: http://localhost:8000

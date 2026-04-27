@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Vistora Browser Extension Setup</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f6f8; margin: 0; padding: 40px; color: #333; }
+        .container { max-width: 700px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; margin-top: 0; }
+        .step { background: #eef2f5; padding: 20px; border-radius: 6px; margin-bottom: 20px; border-left: 4px solid #3498db; }
+        h3 { margin-top: 0; color: #2980b9; }
+        .code { background: #2c3e50; color: #ecf0f1; padding: 10px; border-radius: 4px; font-family: monospace; user-select: all; display: flex; align-items: center; justify-content: space-between; gap: 10px;}
+        .button { background: #27ae60; color: #fff; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block; border: none; cursor: pointer; white-space: nowrap; }
+        .button-secondary { background: #34495e; font-size: 13px; padding: 6px 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Vistora Agent Installed Successfully!</h1>
+        <p>The background agent is running. To complete your setup, you must manually load the browser extension using Developer Mode.</p>
+        
+        <div class="step">
+            <h3>Step 1: Open Chrome Extensions</h3>
+            <p>Open Google Chrome and navigate to the extensions page:</p>
+            <div class="code">
+                <span id="chromeUrl">chrome://extensions</span>
+                <button class="button button-secondary" onclick="copyText('chromeUrl')">Copy URL</button>
+            </div>
+        </div>
+
+        <div class="step">
+            <h3>Step 2: Enable Developer Mode</h3>
+            <p>In the top right corner of the Extensions page, toggle <b>Developer mode</b> to ON.</p>
+        </div>
+
+        <div class="step">
+            <h3>Step 3: Load the Extension</h3>
+            <p>Click the <b>Load unpacked</b> button in the top left corner, then copy and paste this exact folder path into the window:</p>
+            <div class="code">
+                <span id="pathSpan">Loading install path...</span>
+                <button class="button" onclick="copyText('pathSpan')">Copy Path</button>
+            </div>
+        </div>
+        
+        <p style="text-align: center; margin-top: 30px; font-size: 14px; color: #7f8c8d;">
+            You can close this tab once the extension appears in Chrome.
+        </p>
+    </div>
+
+    <script>
+        // Derive install dir from where this HTML file lives
+        var rawPath = window.location.pathname;
+        // Handle file:/// encoding and leading slashes
+        var cleanPath = decodeURI(rawPath)
+            .replace(/^\/([a-zA-Z]:)/, '$1') // Remove leading / before DRIVE: like /D:/
+            .replace(/\/[^/]+$/, '')         // Strip filename
+            .replace(/\//g, '\\')            // Unix -> Windows slashes
+            .replace(/^\\/, '');             // Remove accidental leading backslash
+
+        var extensionPath = cleanPath + '\\browser-extension';
+        document.getElementById("pathSpan").innerText = extensionPath;
+
+        function copyText(id) {
+            var text = document.getElementById(id).innerText;
+            navigator.clipboard.writeText(text).then(function() {
+                alert("Copied to clipboard: " + text);
+            });
+        }
+    </script>
+</body>
+</html>

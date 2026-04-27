@@ -1,0 +1,129 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '3.3.4'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.vistora'
+version = '0.0.1-SNAPSHOT'
+description = 'Demo project for Spring Boot'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+configurations {
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+
+	// DevTools — only included in local dev builds, excluded from production JARs
+	// NOTE: keep only ONE declaration to avoid double class-loader restart which
+	// can leave orphaned HikariCP pools after hot-reload.
+	developmentOnly 'org.springframework.boot:spring-boot-devtools'
+
+	runtimeOnly 'com.mysql:mysql-connector-j'
+
+	compileOnly 'org.projectlombok:lombok'
+	annotationProcessor 'org.projectlombok:lombok'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+	/* ------------------ CACHING ------------------ */
+	implementation 'org.springframework.boot:spring-boot-starter-cache'
+	implementation 'com.github.ben-manes.caffeine:caffeine:3.1.8'
+
+
+	/* ------------------ AZURE + MICROSOFT GRAPH ------------------ */
+	implementation 'com.azure:azure-identity:1.18.0'
+	implementation 'com.azure:azure-core:1.57.0'
+	implementation 'com.azure:azure-security-keyvault-secrets:4.10.3'
+	implementation 'com.microsoft.azure:msal4j:1.23.1'
+	implementation 'com.microsoft.graph:microsoft-graph:6.54.0'
+
+	implementation 'org.springframework.boot:spring-boot-starter'
+	implementation 'org.yaml:snakeyaml:2.0'
+
+	/* ------------------ GOOGLE ADMIN SDK ------------------ */
+	// Core Google API client libraries
+	implementation 'com.google.api-client:google-api-client:2.7.0'
+	implementation 'com.google.oauth-client:google-oauth-client-jetty:1.36.0'
+	implementation 'com.google.http-client:google-http-client-jackson2:1.45.1'
+
+	// Google Admin SDK: Directory API (includes reports functionality)
+	implementation 'com.google.apis:google-api-services-admin-directory:directory_v1-rev20240618-2.0.0'
+
+	// Google Auth libraries for Service Account authentication
+	implementation 'com.google.auth:google-auth-library-oauth2-http:1.27.0'
+	implementation 'com.google.auth:google-auth-library-credentials:1.27.0'
+
+	implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+	implementation 'org.springframework.boot:spring-boot-starter-mail'
+
+	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.6.0'
+
+	/* ------------------ OKTA SDK ------------------ */
+	implementation 'com.okta.sdk:okta-sdk-api:24.0.0'
+	implementation 'com.okta.sdk:okta-sdk-impl:24.0.0'
+	implementation 'com.okta.sdk:okta-sdk-okhttp:8.2.5'
+
+	implementation 'software.amazon.awssdk:auth:2.32.4'
+	implementation 'software.amazon.awssdk:secretsmanager:2.32.4'
+	implementation 'software.amazon.awssdk:sts:2.32.7'
+	implementation 'org.springframework.boot:spring-boot-starter-security'
+
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'io.micrometer:micrometer-tracing-bridge-brave'
+	implementation 'io.zipkin.reporter2:zipkin-reporter-brave'
+	implementation 'io.github.openfeign:feign-micrometer:13.6'
+	implementation 'org.springframework.boot:spring-boot-starter-mail'
+
+	//AWS-SDK
+	implementation 'software.amazon.awssdk:s3:2.25.0'
+
+	// JAXB API for Java 11+
+	implementation 'javax.xml.bind:jaxb-api:2.3.1'
+
+
+//    implementation 'com.okta.sdk:okta-sdk-api:24.1.0'
+//    implementation 'com.okta.sdk:okta-sdk-impl:24.1.0'
+//    implementation 'com.azure:azure-identity:1.19.0'
+
+
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
+
+tasks.register('agentFatJar', Jar) {
+	group = 'build'
+	description = 'Create a fat jar for the telemetry agent'
+	archiveClassifier = 'agent'
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+	manifest {
+		attributes(
+			'Main-Class': 'com.vistora.discovery.monitor.agent.Agent'
+		)
+	}
+
+	from {
+		configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+	}
+	with jar
+	zip64 = true
+}

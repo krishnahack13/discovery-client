@@ -1,0 +1,486 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - when: never
+
+stages:
+  - build_and_push
+  - test
+  - dast    
+  - update_manifest
+  - deploy_to_eks
+  - rollback
+
+variables:
+  AWS_REGION: "us-west-1"
+  AWS_ACCOUNT_ID: "872515269664"
+  DOCKER_DRIVER: overlay2
+  MANIFEST_REPO_URL: "gitlab.com/vistora1/devops/manifests-gitops.git"
+  MANIFEST_REPO_DIR: "manifests-gitops"
+  K8S_NAMESPACE: "default"
+  ROLLBACK_REVISIONS: "1"
+
+# ---------------------------------------------------------------
+# SECURITY TEMPLATES
+# ---------------------------------------------------------------
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/DAST.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+
+# -- Semgrep analyzer (most common, covers JS/TS/Python/Go/etc.) -
+semgrep-sast:
+  stage: test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - when: never
+
+# -- Container Scanning -------------------------------------------
+container_scanning:
+  stage: test
+  variables:
+    CS_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/dev/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - when: never
+
+# -- DAST --------------------------------------------------------
+dast:
+  stage: dast
+  variables:
+    DAST_TARGET_URL: "https://demo-dev.grafyn.ai"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - when: never
+
+
+# =========================================================
+# ======================= DEV ==============================
+# =========================================================
+
+build_and_push_dev:
+  stage: build_and_push
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  variables:
+    DOCKER_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/dev/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+    K8S_DEPLOYMENT_NAME: "discovery-client-dev"
+  before_script:
+    - apk add --no-cache python3 py3-pip git curl jq
+    - pip3 install awscli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+  script:
+    - docker build -t $DOCKER_IMAGE .
+    - docker push $DOCKER_IMAGE
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+
+update_manifest_dev:
+  stage: update_manifest
+  image: alpine:3.18
+  variables:
+    DOCKER_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/dev/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      git clone --branch dev https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+      cd ${MANIFEST_REPO_DIR}
+
+      # Save the previous image tag before overwriting — used by rollback_manifest_dev
+      PREVIOUS_IMAGE=$(grep 'image:' tenant-console/discovery-client/deployment.yaml | awk '{print $2}')
+      echo "Previous image was $PREVIOUS_IMAGE"
+      echo "PREVIOUS_IMAGE=$PREVIOUS_IMAGE" > ../previous_image.env
+
+      sed -i "s|image:.*|image: $DOCKER_IMAGE|g" tenant-console/discovery-client/deployment.yaml
+
+      git config user.email "ci@gitlab.com"
+      git config user.name "CI Bot"
+
+      git add .
+      if git diff --cached --quiet; then
+        echo "No changes"
+      else
+        git commit -m "Update image tag to $DOCKER_IMAGE"
+        git push origin dev
+      fi
+  artifacts:
+    reports:
+      dotenv: previous_image.env
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+
+deploy_to_eks_dev:
+  stage: deploy_to_eks
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-dev"
+  before_script:
+    - apk add --no-cache bash curl git aws-cli
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name dev-grafyn-eks-cluster
+    - git clone --branch dev https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+    - cd ${MANIFEST_REPO_DIR}
+  script:
+    - kubectl apply --dry-run=client -f tenant-console/discovery-client/deployment.yaml
+    - kubectl apply -f tenant-console/discovery-client/deployment.yaml
+    - echo "Waiting for rollout to complete..."
+    - kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE --timeout=3m
+    - echo "Deployment completed successfully"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+
+rollback_k8s_dev:
+  stage: rollback
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-dev"
+  before_script:
+    - apk add --no-cache bash curl git aws-cli
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name dev-grafyn-eks-cluster
+  script:
+    - echo "Rolling back deployment $K8S_DEPLOYMENT_NAME in namespace $K8S_NAMESPACE"
+    - kubectl rollout history deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE
+    - |
+      kubectl rollout undo deployment/$K8S_DEPLOYMENT_NAME \
+        --namespace $K8S_NAMESPACE \
+        --to-revision=$(kubectl rollout history deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE | tail -2 | head -1 | awk '{print $1}')
+    - kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE --timeout=3m
+    - echo "Rollback completed — verify pod health below"
+    - kubectl get pods --namespace $K8S_NAMESPACE -l app=$K8S_DEPLOYMENT_NAME
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+  needs:
+    - deploy_to_eks_dev
+
+rollback_manifest_dev:
+  stage: rollback
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-dev"
+  before_script:
+    - apk add --no-cache git aws-cli curl bash
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name dev-grafyn-eks-cluster
+  script:
+    - echo "Reverting manifest to previous image $PREVIOUS_IMAGE"
+    - git clone --branch dev https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+    - cd ${MANIFEST_REPO_DIR}
+    - |
+      sed -i "s|image:.*|image: $PREVIOUS_IMAGE|g" tenant-console/discovery-client/deployment.yaml
+
+      git config user.email "ci@gitlab.com"
+      git config user.name "CI Bot"
+      git add tenant-console/discovery-client/deployment.yaml
+      git commit -m "Rollback image tag to $PREVIOUS_IMAGE [rollback]"
+      git push origin dev
+
+      kubectl apply -f tenant-console/discovery-client/deployment.yaml
+
+      kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME \
+        --namespace $K8S_NAMESPACE \
+        --timeout=3m
+
+      echo "Manifest rollback complete — cluster reverted to $PREVIOUS_IMAGE"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+  needs:
+    - job: update_manifest_dev
+      artifacts: true
+    - deploy_to_eks_dev
+
+# =========================================================
+# ======================= QA ===============================
+# =========================================================
+
+build_and_push_qa:
+  stage: build_and_push
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  variables:
+    DOCKER_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qa/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+    K8S_DEPLOYMENT_NAME: "discovery-client-qa"
+  before_script:
+    - apk add --no-cache python3 py3-pip git curl jq
+    - pip3 install awscli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+  script:
+    - docker build -t $DOCKER_IMAGE .
+    - docker push $DOCKER_IMAGE
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+
+update_manifest_qa:
+  stage: update_manifest
+  image: alpine:3.18
+  variables:
+    DOCKER_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qa/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      git clone --branch qa https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+      cd ${MANIFEST_REPO_DIR}
+
+      PREVIOUS_IMAGE=$(grep 'image:' tenant-console/discovery-client/deployment.yaml | awk '{print $2}')
+      echo "Previous image was $PREVIOUS_IMAGE"
+      echo "PREVIOUS_IMAGE=$PREVIOUS_IMAGE" > ../previous_image.env
+
+      sed -i "s|image:.*|image: $DOCKER_IMAGE|g" tenant-console/discovery-client/deployment.yaml
+
+      git config user.email "ci@gitlab.com"
+      git config user.name "CI Bot"
+
+      git add .
+      if git diff --cached --quiet; then
+        echo "No changes"
+      else
+        git commit -m "Update image tag to $DOCKER_IMAGE"
+        git push origin qa
+      fi
+  artifacts:
+    reports:
+      dotenv: previous_image.env
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+
+deploy_to_eks_qa:
+  stage: deploy_to_eks
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-qa"
+  before_script:
+    - apk add --no-cache bash curl git aws-cli
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name qa-grafyn-eks-cluster
+    - git clone --branch qa https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+    - cd ${MANIFEST_REPO_DIR}
+  script:
+    - kubectl apply --dry-run=client -f tenant-console/discovery-client/deployment.yaml
+    - kubectl apply -f tenant-console/discovery-client/deployment.yaml
+    - echo "Waiting for rollout to complete..."
+    - kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE --timeout=3m
+    - echo "Deployment completed successfully"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+      when: manual
+
+rollback_k8s_qa:
+  stage: rollback
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-qa"
+  before_script:
+    - apk add --no-cache bash curl git aws-cli
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name qa-grafyn-eks-cluster
+  script:
+    - echo "Rolling back deployment $K8S_DEPLOYMENT_NAME in namespace $K8S_NAMESPACE"
+    - kubectl rollout history deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE
+    - |
+      kubectl rollout undo deployment/$K8S_DEPLOYMENT_NAME \
+        --namespace $K8S_NAMESPACE \
+        --to-revision=$(kubectl rollout history deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE | tail -2 | head -1 | awk '{print $1}')
+    - kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE --timeout=3m
+    - echo "Rollback completed — verify pod health below"
+    - kubectl get pods --namespace $K8S_NAMESPACE -l app=$K8S_DEPLOYMENT_NAME
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+      when: manual
+  needs:
+    - deploy_to_eks_qa
+
+rollback_manifest_qa:
+  stage: rollback
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-qa"
+  before_script:
+    - apk add --no-cache git aws-cli curl bash
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name qa-grafyn-eks-cluster
+  script:
+    - echo "Reverting manifest to previous image $PREVIOUS_IMAGE"
+    - git clone --branch qa https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+    - cd ${MANIFEST_REPO_DIR}
+    - |
+      sed -i "s|image:.*|image: $PREVIOUS_IMAGE|g" tenant-console/discovery-client/deployment.yaml
+
+      git config user.email "ci@gitlab.com"
+      git config user.name "CI Bot"
+      git add tenant-console/discovery-client/deployment.yaml
+      git commit -m "Rollback image tag to $PREVIOUS_IMAGE [rollback]"
+      git push origin qa
+
+      kubectl apply -f tenant-console/discovery-client/deployment.yaml
+
+      kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME \
+        --namespace $K8S_NAMESPACE \
+        --timeout=3m
+
+      echo "Manifest rollback complete — cluster reverted to $PREVIOUS_IMAGE"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+      when: manual
+  needs:
+    - job: update_manifest_qa
+      artifacts: true
+    - deploy_to_eks_qa
+
+# =========================================================
+# ======================= PROD =============================
+# =========================================================
+
+build_and_push_prod:
+  stage: build_and_push
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  variables:
+    DOCKER_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/prod/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+    K8S_DEPLOYMENT_NAME: "discovery-client-prod"
+  before_script:
+    - apk add --no-cache python3 py3-pip git curl jq
+    - pip3 install awscli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+  script:
+    - docker build -t $DOCKER_IMAGE .
+    - docker push $DOCKER_IMAGE
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "prod"'
+
+update_manifest_prod:
+  stage: update_manifest
+  image: alpine:3.18
+  variables:
+    DOCKER_IMAGE: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/prod/tenant-console/discovery-client:$CI_COMMIT_SHORT_SHA"
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      git clone --branch prod https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+      cd ${MANIFEST_REPO_DIR}
+
+      PREVIOUS_IMAGE=$(grep 'image:' tenant-console/discovery-client/deployment.yaml | awk '{print $2}')
+      echo "Previous image was $PREVIOUS_IMAGE"
+      echo "PREVIOUS_IMAGE=$PREVIOUS_IMAGE" > ../previous_image.env
+
+      sed -i "s|image:.*|image: $DOCKER_IMAGE|g" tenant-console/discovery-client/deployment.yaml
+
+      git config user.email "ci@gitlab.com"
+      git config user.name "CI Bot"
+
+      git add .
+      if git diff --cached --quiet; then
+        echo "No changes"
+      else
+        git commit -m "Update image tag to $DOCKER_IMAGE"
+        git push origin prod
+      fi
+  artifacts:
+    reports:
+      dotenv: previous_image.env
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "prod"'
+
+deploy_to_eks_prod:
+  stage: deploy_to_eks
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-prod"
+  before_script:
+    - apk add --no-cache bash curl git aws-cli
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name prod-grafyn-eks-cluster
+    - git clone --branch prod https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+    - cd ${MANIFEST_REPO_DIR}
+  script:
+    - kubectl apply --dry-run=client -f tenant-console/discovery-client/deployment.yaml
+    - kubectl apply -f tenant-console/discovery-client/deployment.yaml
+    - echo "Waiting for rollout to complete..."
+    - kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE --timeout=3m
+    - echo "Deployment completed successfully"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "prod"'
+      when: manual
+
+rollback_k8s_prod:
+  stage: rollback
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-prod"
+  before_script:
+    - apk add --no-cache bash curl git aws-cli
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name prod-grafyn-eks-cluster
+  script:
+    - echo "Rolling back deployment $K8S_DEPLOYMENT_NAME in namespace $K8S_NAMESPACE"
+    - kubectl rollout history deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE
+    - |
+      kubectl rollout undo deployment/$K8S_DEPLOYMENT_NAME \
+        --namespace $K8S_NAMESPACE \
+        --to-revision=$(kubectl rollout history deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE | tail -2 | head -1 | awk '{print $1}')
+    - kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME --namespace $K8S_NAMESPACE --timeout=3m
+    - echo "Rollback completed — verify pod health below"
+    - kubectl get pods --namespace $K8S_NAMESPACE -l app=$K8S_DEPLOYMENT_NAME
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "prod"'
+      when: manual
+  needs:
+    - deploy_to_eks_prod
+
+rollback_manifest_prod:
+  stage: rollback
+  image: alpine:3.18
+  variables:
+    K8S_DEPLOYMENT_NAME: "discovery-client-prod"
+  before_script:
+    - apk add --no-cache git aws-cli curl bash
+    - curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region us-west-2 --name prod-grafyn-eks-cluster
+  script:
+    - echo "Reverting manifest to previous image $PREVIOUS_IMAGE"
+    - git clone --branch prod https://oauth2:${PROJECT_MANIFEST_TOKEN}@${MANIFEST_REPO_URL} ${MANIFEST_REPO_DIR}
+    - cd ${MANIFEST_REPO_DIR}
+    - |
+      sed -i "s|image:.*|image: $PREVIOUS_IMAGE|g" tenant-console/discovery-client/deployment.yaml
+
+      git config user.email "ci@gitlab.com"
+      git config user.name "CI Bot"
+      git add tenant-console/discovery-client/deployment.yaml
+      git commit -m "Rollback image tag to $PREVIOUS_IMAGE [rollback]"
+      git push origin prod
+
+      kubectl apply -f tenant-console/discovery-client/deployment.yaml
+
+      kubectl rollout status deployment/$K8S_DEPLOYMENT_NAME \
+        --namespace $K8S_NAMESPACE \
+        --timeout=3m
+
+      echo "Manifest rollback complete — cluster reverted to $PREVIOUS_IMAGE"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "prod"'
+      when: manual
+  needs:
+    - job: update_manifest_prod
+      artifacts: true
+    - deploy_to_eks_prod

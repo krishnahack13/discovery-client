@@ -1,0 +1,14 @@
+{
+  "ignore_processes": [
+    "windsurf.exe",
+    "windsurf",
+    "devin.exe"
+  ],
+  "ignore_domains": [
+    "google.com"
+  ],
+  "ignore_extensions": [
+    "some.secret.ide.extension",
+    "personal-chrome-extension"
+  ]
+}
