@@ -19,7 +19,7 @@ jobs:
           java-version: '17'
 
       - name: Build JAR
-        run: ./gradlew build || ./gradlew.bat build
+        run: ./gradlew build
 
       - name: Make script executable
         run: chmod +x package-mac.sh
