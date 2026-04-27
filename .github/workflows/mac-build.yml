@@ -13,16 +13,13 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Setup Java
-        uses: actions/upload-artifact@v4
+        uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew || true
-
       - name: Build JAR
-        run: ./gradlew build
+        run: ./gradlew build || ./gradlew.bat build
 
       - name: Make script executable
         run: chmod +x package-mac.sh
@@ -31,7 +28,7 @@ jobs:
         run: ./package-mac.sh
 
       - name: Upload DMG
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: vistora-dmg
           path: dist/*.dmg
